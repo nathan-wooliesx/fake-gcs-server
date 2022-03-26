@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -110,6 +111,10 @@ type Options struct {
 
 	// Location used for buckets in the server.
 	BucketsLocation string
+
+	CertificateLocation string
+
+	PrivateKeyLocation string
 }
 
 // NewServerWithOptions creates a new server configured according to the
@@ -166,6 +171,13 @@ func NewServerWithOptions(options Options) (*Server, error) {
 		s.ts.Listener.Close()
 		s.ts.Listener = l
 	}
+	if options.CertificateLocation != "" && options.PrivateKeyLocation != "" {
+		cert, err := tls.LoadX509KeyPair(options.CertificateLocation, options.PrivateKeyLocation)
+		if err != nil {
+			return nil, err
+		}
+		s.ts.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+	}
 	startFunc()
 
 	return s, nil
@@ -206,7 +218,7 @@ func (s *Server) buildMuxer() {
 
 	routers := []*mux.Router{
 		s.mux.PathPrefix(apiPrefix).Subrouter(),
-		s.mux.Host(s.publicHost).PathPrefix(apiPrefix).Subrouter(),
+		s.mux.MatcherFunc(s.publicHostMatcher).PathPrefix(apiPrefix).Subrouter(),
 	}
 
 	for _, r := range routers {
@@ -230,7 +242,7 @@ func (s *Server) buildMuxer() {
 
 	// Internal / update server configuration
 	s.mux.Path("/_internal/config").Methods(http.MethodPut).HandlerFunc(jsonToHTTPHandler(s.updateServerConfig))
-	s.mux.Host(s.publicHost).Path("/_internal/config").Methods(http.MethodPut).HandlerFunc(jsonToHTTPHandler(s.updateServerConfig))
+	s.mux.MatcherFunc(s.publicHostMatcher).Path("/_internal/config").Methods(http.MethodPut).HandlerFunc(jsonToHTTPHandler(s.updateServerConfig))
 	// Internal - end
 
 	bucketHost := fmt.Sprintf("{bucketName}.%s", s.publicHost)
@@ -240,10 +252,10 @@ func (s *Server) buildMuxer() {
 	s.mux.Path("/upload/resumable/{uploadId}").Methods(http.MethodPut, http.MethodPost).HandlerFunc(jsonToHTTPHandler(s.uploadFileContent))
 
 	// Batch endpoint
-	s.mux.Host(s.publicHost).Path("/batch/storage/v1").Methods(http.MethodPost).HandlerFunc(s.handleBatchCall)
+	s.mux.MatcherFunc(s.publicHostMatcher).Path("/batch/storage/v1").Methods(http.MethodPost).HandlerFunc(s.handleBatchCall)
 	s.mux.Path("/batch/storage/v1").Methods(http.MethodPost).HandlerFunc(s.handleBatchCall)
 
-	s.mux.Host(s.publicHost).Path("/{bucketName}/{objectName:.+}").Methods(http.MethodGet, http.MethodHead).HandlerFunc(s.downloadObject)
+	s.mux.MatcherFunc(s.publicHostMatcher).Path("/{bucketName}/{objectName:.+}").Methods(http.MethodGet, http.MethodHead).HandlerFunc(s.downloadObject)
 	s.mux.Host("{bucketName:.+}").Path("/{objectName:.+}").Methods(http.MethodGet, http.MethodHead).HandlerFunc(s.downloadObject)
 
 	// Form Uploads
@@ -254,6 +266,15 @@ func (s *Server) buildMuxer() {
 	s.mux.Host(s.publicHost).Path("/{bucketName}/{objectName:.+}").Methods(http.MethodPost, http.MethodPut).HandlerFunc(jsonToHTTPHandler(s.insertObject))
 	s.mux.Host(bucketHost).Path("/{objectName:.+}").Methods(http.MethodPost, http.MethodPut).HandlerFunc(jsonToHTTPHandler(s.insertObject))
 	s.mux.Host("{bucketName:.+}").Path("/{objectName:.+}").Methods(http.MethodPost, http.MethodPut).HandlerFunc(jsonToHTTPHandler(s.insertObject))
+}
+
+// publicHostMatcher matches incoming requests against the currently specified server publicHost.
+func (s *Server) publicHostMatcher(r *http.Request, rm *mux.RouteMatch) bool {
+	if strings.Contains(s.publicHost, ":") || !strings.Contains(r.Host, ":") {
+		return r.Host == s.publicHost
+	}
+	idx := strings.IndexByte(r.Host, ':')
+	return r.Host[:idx] == s.publicHost
 }
 
 // Stop stops the server, closing all connections.
@@ -328,7 +349,6 @@ func (s *Server) handleBatchCall(w http.ResponseWriter, r *http.Request) {
 		partHeaders.Set("Content-Type", "application/http")
 		partHeaders.Set("Content-ID", strings.Replace(contentID, "<", "<response-", 1))
 		partWriter, err := mw.CreatePart(partHeaders)
-
 		if err != nil {
 			continue
 		}

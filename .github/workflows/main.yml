@@ -13,8 +13,8 @@ jobs:
     strategy:
       matrix:
         go_version:
-          - 1.16
           - 1.17
+          - 1.18
         os:
           - macos
           - ubuntu
@@ -63,7 +63,7 @@ jobs:
       - uses: actions/setup-go@v3.0.0
         id: go
         with:
-          go-version: 1.17
+          go-version: 1.18
 
       - run: |
           go install honnef.co/go/tools/cmd/staticcheck@master
@@ -75,7 +75,7 @@ jobs:
 
       - name: staticcheck cache
         id: staticcheck-cache
-        uses: actions/cache@v2.1.7
+        uses: actions/cache@v3.0.0
         with:
           path: ~/.cache/staticcheck
           key: "${{ steps.get-staticcheck-version.outputs.version }}"
@@ -95,7 +95,7 @@ jobs:
       - uses: actions/setup-go@v3.0.0
         id: go
         with:
-          go-version: 1.17
+          go-version: 1.18
 
       - name: go-build
         run: go build -o fake-gcs-server
@@ -132,7 +132,7 @@ jobs:
             docker-image: mcr.microsoft.com/dotnet/sdk:5.0-alpine
             entrypoint: /bin/sh
           - lang: scala
-            docker-image: mozilla/sbt:latest
+            docker-image: mozilla/sbt:8u292_1.5.7
             entrypoint: /bin/sh
           - lang: java
             docker-image: openjdk:11

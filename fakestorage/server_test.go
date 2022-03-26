@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -88,7 +89,7 @@ func TestNewServerLogging(t *testing.T) {
 
 func TestPublicURL(t *testing.T) {
 	t.Parallel()
-	var tests = []struct {
+	tests := []struct {
 		name     string
 		options  Options
 		expected string
@@ -149,6 +150,114 @@ func TestDownloadObject(t *testing.T) {
 	}
 	runServersTest(t, objs, testDownloadObject)
 	runServersTest(t, objs, testDownloadObjectRange)
+}
+
+func TestDownloadAfterPublicHostChange(t *testing.T) {
+	server, err := NewServerWithOptions(Options{PublicHost: "127.0.0.1:80", InitialObjects: []Object{
+		{ObjectAttrs: ObjectAttrs{BucketName: "some-bucket", Name: "files/txt/text-01.txt"}, Content: []byte("something")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := server.HTTPClient()
+	requestURL := server.URL() + "/some-bucket/files/txt/text-01.txt"
+
+	req, err := http.NewRequest(http.MethodGet, requestURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// First request fails because the port configured in PublicHost
+	// doesn't match.
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("wrong status returned\nwant %d\ngot  %d", http.StatusNotFound, resp.StatusCode)
+	}
+
+	// Now set the public host to match the httptest.Server and try again.
+	serverURL, err := url.Parse(server.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.publicHost = serverURL.Host
+
+	req, err = http.NewRequest(http.MethodGet, requestURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// This second request should succeed because the public host now matches.
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("wrong status returned\nwant %d\ngot  %d", http.StatusOK, resp.StatusCode)
+	}
+}
+
+func TestDownloadPartialPublicHostMatch(t *testing.T) {
+	server, err := NewServerWithOptions(Options{PublicHost: "127.0.0.1", InitialObjects: []Object{
+		{ObjectAttrs: ObjectAttrs{BucketName: "some-bucket", Name: "files/txt/text-01.txt"}, Content: []byte("something")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := server.HTTPClient()
+	requestURL := server.URL() + "/some-bucket/files/txt/text-01.txt"
+
+	req, err := http.NewRequest(http.MethodGet, requestURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("wrong status returned\nwant %d\ngot  %d", http.StatusOK, resp.StatusCode)
+	}
+}
+
+func TestDownloadPartialHostValidationShouldntValidatePortPartially(t *testing.T) {
+	server, err := NewServerWithOptions(Options{PublicHost: "127.0.0.1", InitialObjects: []Object{
+		{ObjectAttrs: ObjectAttrs{BucketName: "some-bucket", Name: "files/txt/text-01.txt"}, Content: []byte("something")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := server.HTTPClient()
+	requestURL := server.URL() + "/some-bucket/files/txt/text-01.txt"
+
+	serverURL, err := url.Parse(server.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.publicHost = serverURL.Hostname() + ":" + serverURL.Port()[:2]
+
+	req, err := http.NewRequest(http.MethodGet, requestURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("wrong status returned\nwant %d\ngot  %d", http.StatusNotFound, resp.StatusCode)
+	}
 }
 
 func testDownloadObject(t *testing.T, server *Server) {
@@ -276,16 +385,25 @@ func TestUpdateServerConfig(t *testing.T) {
 		name                string
 		requestBody         string
 		expectedExternalUrl string
+		expectedPublicHost  string
 	}{
 		{
 			"PUT: empty json",
 			"{}",
 			"https://0.0.0.0:4443",
+			"0.0.0.0:4443",
 		},
 		{
 			"PUT: externalUrl provided",
 			"{\"externalUrl\": \"https://1.2.3.4:4321\"}",
 			"https://1.2.3.4:4321",
+			"0.0.0.0:4443",
+		},
+		{
+			"PUT: publicHost provided",
+			"{\"publicHost\": \"1.2.3.4:4321\"}",
+			"https://1.2.3.4:4321",
+			"1.2.3.4:4321",
 		},
 	}
 
@@ -317,6 +435,7 @@ func TestUpdateServerConfig(t *testing.T) {
 			}
 
 			assert.Equal(t, test.expectedExternalUrl, server.externalURL)
+			assert.Equal(t, test.expectedPublicHost, server.publicHost)
 		})
 	}
 }
@@ -797,7 +916,7 @@ func (m *fakeEventManager) Trigger(o *backend.Object, eventType notification.Eve
 }
 
 func runServersTest(t *testing.T, objs []Object, fn func(*testing.T, *Server)) {
-	var testScenarios = []struct {
+	testScenarios := []struct {
 		name    string
 		options Options
 	}{
